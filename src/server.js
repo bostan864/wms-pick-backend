@@ -5,7 +5,9 @@ import fs from "fs/promises";
 import path from "path";
 import { createClient } from "@supabase/supabase-js";
 
-/* ===================== ENV ===================== */
+/* =====================
+   ENV
+===================== */
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -18,7 +20,9 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_JWT_SECRET) {
   process.exit(1);
 }
 
-/* ===================== APP ===================== */
+/* =====================
+   APP
+===================== */
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -28,7 +32,9 @@ const supabase = createClient(
   SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* ===================== AUTH ===================== */
+/* =====================
+   AUTH MIDDLEWARE
+===================== */
 function requireAuth(req, res, next) {
   try {
     const header = req.headers.authorization || "";
@@ -40,6 +46,7 @@ function requireAuth(req, res, next) {
 
     const payload = jwt.verify(token, SUPABASE_JWT_SECRET);
 
+    // user_id din Supabase Auth
     req.userId = payload.sub;
     next();
   } catch (err) {
@@ -47,24 +54,40 @@ function requireAuth(req, res, next) {
   }
 }
 
-/* ===================== HEALTH ===================== */
+/* =====================
+   USER → ACCOUNT
+===================== */
+async function getAccountIdForUser(userId) {
+  const { data, error } = await supabase
+    .from("user_accounts")
+    .select("account_id")
+    .eq("user_id", userId)
+    .single();
+
+  if (error || !data?.account_id) {
+    throw new Error("Account not found for user");
+  }
+
+  return data.account_id;
+}
+
+/* =====================
+   HEALTH
+===================== */
 app.get("/health", (_, res) => {
-  res.json({ status: "ok", service: "wms-pick-backend" });
+  res.json({
+    status: "ok",
+    service: "wms-pick-backend",
+    time: new Date().toISOString()
+  });
 });
 
-/* ===================== LIST ORDERS ===================== */
-/**
- * RETURNĂ DOAR:
- * - account_id = user account
- * - status = pending
- */
+/* =====================
+   LIST ORDERS (PENDING)
+===================== */
 app.get("/orders/list", requireAuth, async (req, res) => {
   try {
-    const accountId = req.headers["x-account-id"];
-
-    if (!accountId) {
-      return res.status(400).json({ error: "Missing account id" });
-    }
+    const accountId = await getAccountIdForUser(req.userId);
 
     const { data, error } = await supabase
       .from("orders")
@@ -75,27 +98,29 @@ app.get("/orders/list", requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    const orders = (data || []).map(o => ({
-      orderId: o.order_number,
-      total_amount: o.total_amount
-    }));
-
-    res.json(orders);
+    res.json(
+      (data || []).map(o => ({
+        orderId: o.order_number,
+        total_amount: o.total_amount
+      }))
+    );
   } catch (err) {
-    console.error("orders/list error:", err);
+    console.error("❌ orders/list:", err.message);
     res.status(500).json({ error: "Failed to load orders" });
   }
 });
 
-/* ===================== GET SINGLE ORDER ===================== */
+/* =====================
+   GET SINGLE ORDER
+===================== */
 app.get("/orders/get", requireAuth, async (req, res) => {
   try {
     const { orderId } = req.query;
-    const accountId = req.headers["x-account-id"];
-
-    if (!orderId || !accountId) {
-      return res.status(400).json({ error: "Invalid request" });
+    if (!orderId) {
+      return res.status(400).json({ error: "Missing orderId" });
     }
+
+    const accountId = await getAccountIdForUser(req.userId);
 
     const { data: order, error } = await supabase
       .from("orders")
@@ -113,19 +138,22 @@ app.get("/orders/get", requireAuth, async (req, res) => {
 
     res.json(json);
   } catch (err) {
-    console.error("orders/get error:", err);
+    console.error("❌ orders/get:", err.message);
     res.status(500).json({ error: "Failed to load order" });
   }
 });
 
-/* ===================== DELETE (FINALIZE / CANCEL) ===================== */
+/* =====================
+   FINALIZE / CANCEL ORDER
+===================== */
 app.post("/orders/delete", requireAuth, async (req, res) => {
   try {
-    const { orderId, accountId } = req.body;
-
-    if (!orderId || !accountId) {
-      return res.status(400).json({ error: "Invalid payload" });
+    const { orderId } = req.body;
+    if (!orderId) {
+      return res.status(400).json({ error: "Missing orderId" });
     }
+
+    const accountId = await getAccountIdForUser(req.userId);
 
     const { error } = await supabase
       .from("orders")
@@ -137,15 +165,18 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    console.error("orders/delete error:", err);
+    console.error("❌ orders/delete:", err.message);
     res.status(500).json({ error: "Failed to update order" });
   }
 });
 
-/* ===================== START ===================== */
+/* =====================
+   START
+===================== */
 app.listen(PORT, () => {
   console.log(`✅ WMS backend running on port ${PORT}`);
 });
+
 
 
 
