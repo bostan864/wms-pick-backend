@@ -3,83 +3,57 @@ import cors from "cors";
 import jwt from "jsonwebtoken";
 import { createClient } from "@supabase/supabase-js";
 
-/* =====================
-   BASIC APP SETUP
-===================== */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 8080;
+// =====================
+// ENV
+// =====================
+const PORT = process.env.PORT || 3000;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const JWT_SECRET = process.env.JWT_SECRET;
 
-/* =====================
-   ENV VALIDATION
-===================== */
-const {
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  SUPABASE_JWT_SECRET
-} = process.env;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_JWT_SECRET) {
-  console.error("❌ Missing Supabase ENV vars");
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !JWT_SECRET) {
+  console.error("❌ Missing ENV vars");
   process.exit(1);
 }
 
-/* =====================
-   SUPABASE CLIENT
-===================== */
+// =====================
+// SUPABASE CLIENT
+// =====================
 const supabase = createClient(
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* =====================
-   AUTH MIDDLEWARE
-   - validează JWT Supabase
-   - injectează user_id + account_id
-===================== */
-async function authMiddleware(req, res, next) {
+// =====================
+// AUTH MIDDLEWARE
+// =====================
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization || "";
+  const token = auth.replace("Bearer ", "");
+
+  if (!token) {
+    return res.status(401).json({ error: "Missing token" });
+  }
+
   try {
-    const auth = req.headers.authorization;
-    if (!auth?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Missing auth token" });
-    }
-
-    const token = auth.replace("Bearer ", "");
-    const decoded = jwt.verify(token, SUPABASE_JWT_SECRET);
-
-    const userId = decoded.sub;
-    if (!userId) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-
-    const { data, error } = await supabase
-      .from("user_accounts")
-      .select("account_id")
-      .eq("user_id", userId)
-      .single();
-
-    if (error || !data) {
-      return res.status(403).json({ error: "Account not found" });
-    }
-
+    const decoded = jwt.verify(token, JWT_SECRET);
     req.user = {
-      userId,
-      accountId: data.account_id
+      userId: decoded.sub,
+      accountId: decoded.account_id
     };
-
     next();
-
   } catch (err) {
-    console.error("❌ Auth error:", err.message);
-    res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-/* =====================
-   HEALTH CHECK
-===================== */
+// =====================
+// HEALTH
+// =====================
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -88,10 +62,9 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* =====================
-   GET ORDERS LIST
-   (pending only, account scoped)
-===================== */
+// =====================
+// ORDERS LIST
+// =====================
 app.get("/orders/list", authMiddleware, async (req, res) => {
   try {
     const { accountId } = req.user;
@@ -99,8 +72,8 @@ app.get("/orders/list", authMiddleware, async (req, res) => {
     const { data, error } = await supabase
       .from("orders")
       .select("order_number, total_amount")
-      .eq("status", "pending")
       .eq("account_id", accountId)
+      .eq("status", "pending")
       .order("order_number", { ascending: false });
 
     if (error) throw error;
@@ -111,17 +84,15 @@ app.get("/orders/list", authMiddleware, async (req, res) => {
         total_amount: o.total_amount
       }))
     );
-
   } catch (err) {
     console.error("❌ orders/list:", err);
     res.status(500).json({ error: "Failed to load orders" });
   }
 });
 
-/* =====================
-   GET SINGLE ORDER
-   (with products)
-===================== */
+// =====================
+// ORDER GET (DIN STORAGE)
+// =====================
 app.get("/orders/get", authMiddleware, async (req, res) => {
   try {
     const { orderId } = req.query;
@@ -131,18 +102,10 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Missing orderId" });
     }
 
+    // 1️⃣ comandă + storage_path
     const { data: order, error } = await supabase
       .from("orders")
-      .select(`
-        order_number,
-        order_items (
-          product_sku,
-          product_name,
-          product_ean,
-          quantity,
-          item_type
-        )
-      `)
+      .select("order_number, storage_path")
       .eq("order_number", orderId)
       .eq("account_id", accountId)
       .single();
@@ -151,9 +114,33 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
+    if (!order.storage_path) {
+      return res.json({ orderId, line_items: [] });
+    }
+
+    // 2️⃣ citire fișier din bucket `comenzi`
+    const { data: file, error: fileError } = await supabase
+      .storage
+      .from("comenzi")
+      .download(order.storage_path);
+
+    if (fileError) {
+      console.error("❌ storage:", fileError);
+      return res.status(500).json({ error: "Failed to read order file" });
+    }
+
+    // 3️⃣ parse JSON
+    const raw = await file.text();
+    const payload = JSON.parse(raw);
+
+    // 4️⃣ produse
+    const items = (payload.line_items || []).filter(
+      i => i.item_type === "product"
+    );
+
     res.json({
       orderId: order.order_number,
-      line_items: order.order_items || []
+      line_items: items
     });
 
   } catch (err) {
@@ -162,9 +149,9 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
   }
 });
 
-/* =====================
-   FINALIZE ORDER
-===================== */
+// =====================
+// FINALIZE ORDER
+// =====================
 app.post("/orders/delete", authMiddleware, async (req, res) => {
   try {
     const { orderId } = req.body;
@@ -183,18 +170,18 @@ app.post("/orders/delete", authMiddleware, async (req, res) => {
     if (error) throw error;
 
     res.json({ ok: true });
-
   } catch (err) {
     console.error("❌ orders/delete:", err);
     res.status(500).json({ error: "Failed to finalize order" });
   }
 });
 
-/* =====================
-   START SERVER
-===================== */
+// =====================
+// START
+// =====================
 app.listen(PORT, () => {
   console.log(`✅ WMS backend running on port ${PORT}`);
 });
+
 
 
