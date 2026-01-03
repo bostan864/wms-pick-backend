@@ -13,7 +13,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !JWT_SECRET) {
   console.error("❌ Missing ENV vars");
