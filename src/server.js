@@ -22,3 +22,29 @@ app.get("/health", (req, res) => {
 app.listen(PORT, () => {
   console.log(`WMS backend running on port ${PORT}`);
 });
+// Orders list – proxy către Supabase Edge Function
+app.get("/orders/list", async (req, res) => {
+  try {
+    const auth = req.headers.authorization;
+
+    if (!auth) {
+      return res.status(401).json({ error: "Missing Authorization header" });
+    }
+
+    const response = await fetch(
+      "https://yvmqfsigxecmrygmbolg.supabase.co/functions/v1/orders-list",
+      {
+        headers: {
+          Authorization: auth
+        }
+      }
+    );
+
+    const data = await response.json();
+    res.json(data);
+
+  } catch (err) {
+    console.error("orders/list error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
