@@ -48,3 +48,14 @@ app.get("/orders/list", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+app.get("/orders/list", async (req, res) => {
+  res.json([]);
+});
+
+app.get("/orders/get", async (req, res) => {
+  res.json({ line_items: [] });
+});
+
+app.post("/orders/delete", async (req, res) => {
+  res.json({ ok: true });
+});
