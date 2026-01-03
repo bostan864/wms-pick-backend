@@ -10,7 +10,7 @@ app.use(express.json());
 // =====================
 // ENV
 // =====================
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const JWT_SECRET = process.env.SUPABASE_JWT_SECRET;
@@ -32,21 +32,24 @@ const supabase = createClient(
 // AUTH MIDDLEWARE
 // =====================
 function authMiddleware(req, res, next) {
-  const auth = req.headers.authorization || "";
-  const token = auth.replace("Bearer ", "");
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.replace("Bearer ", "");
 
   if (!token) {
-    return res.status(401).json({ error: "Missing token" });
+    return res.status(401).json({ error: "Missing Authorization token" });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+
     req.user = {
       userId: decoded.sub,
       accountId: decoded.account_id
     };
+
     next();
   } catch (err) {
+    console.error("JWT error:", err.message);
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -63,7 +66,7 @@ app.get("/health", (req, res) => {
 });
 
 // =====================
-// ORDERS LIST
+// ORDERS LIST (CORECT)
 // =====================
 app.get("/orders/list", authMiddleware, async (req, res) => {
   try {
@@ -71,22 +74,25 @@ app.get("/orders/list", authMiddleware, async (req, res) => {
 
     const { data, error } = await supabase
       .from("orders")
-      .select("order_number, total_amount")
+      .select("order_number, total_amount, status")
       .eq("account_id", accountId)
-      .eq("status", "pending")
       .order("order_number", { ascending: false });
 
-    if (error) throw error;
+    if (error) {
+      console.error("Supabase error:", error);
+      return res.status(500).json({ error: "Failed to load orders" });
+    }
 
     res.json(
       (data || []).map(o => ({
         orderId: o.order_number,
-        total_amount: o.total_amount
+        total_amount: o.total_amount,
+        status: o.status
       }))
     );
   } catch (err) {
-    console.error("❌ orders/list:", err);
-    res.status(500).json({ error: "Failed to load orders" });
+    console.error("orders/list:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
@@ -102,7 +108,6 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "Missing orderId" });
     }
 
-    // 1️⃣ comandă + storage_path
     const { data: order, error } = await supabase
       .from("orders")
       .select("order_number, storage_path")
@@ -118,22 +123,19 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
       return res.json({ orderId, line_items: [] });
     }
 
-    // 2️⃣ citire fișier din bucket `comenzi`
     const { data: file, error: fileError } = await supabase
       .storage
       .from("comenzi")
       .download(order.storage_path);
 
     if (fileError) {
-      console.error("❌ storage:", fileError);
+      console.error("Storage error:", fileError);
       return res.status(500).json({ error: "Failed to read order file" });
     }
 
-    // 3️⃣ parse JSON
     const raw = await file.text();
     const payload = JSON.parse(raw);
 
-    // 4️⃣ produse
     const items = (payload.line_items || []).filter(
       i => i.item_type === "product"
     );
@@ -142,10 +144,9 @@ app.get("/orders/get", authMiddleware, async (req, res) => {
       orderId: order.order_number,
       line_items: items
     });
-
   } catch (err) {
-    console.error("❌ orders/get:", err);
-    res.status(500).json({ error: "Failed to load order" });
+    console.error("orders/get:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
@@ -167,12 +168,15 @@ app.post("/orders/delete", authMiddleware, async (req, res) => {
       .eq("order_number", orderId)
       .eq("account_id", accountId);
 
-    if (error) throw error;
+    if (error) {
+      console.error("Finalize error:", error);
+      return res.status(500).json({ error: "Failed to finalize order" });
+    }
 
     res.json({ ok: true });
   } catch (err) {
-    console.error("❌ orders/delete:", err);
-    res.status(500).json({ error: "Failed to finalize order" });
+    console.error("orders/delete:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 });
 
@@ -182,6 +186,7 @@ app.post("/orders/delete", authMiddleware, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ WMS backend running on port ${PORT}`);
 });
+
 
 
 
