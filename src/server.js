@@ -1,16 +1,16 @@
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
+import fs from "fs/promises";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
 
-// =======================
-// ENV VALIDATION
-// =======================
+/* ===================== ENV ===================== */
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   SUPABASE_JWT_SECRET,
-  PORT
+  PORT = 8080
 } = process.env;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_JWT_SECRET) {
@@ -18,9 +18,7 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_JWT_SECRET) {
   process.exit(1);
 }
 
-// =======================
-// INIT
-// =======================
+/* ===================== APP ===================== */
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -30,117 +28,125 @@ const supabase = createClient(
   SUPABASE_SERVICE_ROLE_KEY
 );
 
-const JWT_SECRET = SUPABASE_JWT_SECRET;
-
-// =======================
-// AUTH MIDDLEWARE
-// =======================
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.replace("Bearer ", "");
-
-  if (!token) {
-    return res.status(401).json({ error: "Missing Authorization token" });
-  }
-
+/* ===================== AUTH ===================== */
+function requireAuth(req, res, next) {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const header = req.headers.authorization || "";
+    const token = header.replace("Bearer ", "");
 
-    const accountId =
-      decoded.account_id ||
-      decoded.user_metadata?.account_id ||
-      decoded.app_metadata?.account_id;
-
-    if (!accountId) {
-      console.error("❌ account_id missing in JWT", decoded);
-      return res.status(401).json({ error: "Invalid token" });
+    if (!token) {
+      return res.status(401).json({ error: "Missing token" });
     }
 
-    req.user = {
-      userId: decoded.sub,
-      accountId
-    };
+    const payload = jwt.verify(token, SUPABASE_JWT_SECRET);
 
+    req.userId = payload.sub;
     next();
   } catch (err) {
-    console.error("JWT error:", err.message);
     return res.status(401).json({ error: "Invalid token" });
   }
 }
 
-// =======================
-// HEALTH CHECK
-// =======================
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "wms-pick-backend",
-    time: new Date().toISOString()
-  });
+/* ===================== HEALTH ===================== */
+app.get("/health", (_, res) => {
+  res.json({ status: "ok", service: "wms-pick-backend" });
 });
 
-// =======================
-// LIST ORDERS (WMS)
-// ONLY PENDING = DE PREGĂTIT
-// =======================
-app.get("/orders/list", authMiddleware, async (req, res) => {
+/* ===================== LIST ORDERS ===================== */
+/**
+ * RETURNĂ DOAR:
+ * - account_id = user account
+ * - status = pending
+ */
+app.get("/orders/list", requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("orders")
-      .select("id, order_number, total_amount, status")
-      .eq("account_id", req.user.accountId)
-      .eq("status", "pending")
-      .order("created_at", { ascending: false });
+    const accountId = req.headers["x-account-id"];
 
-    if (error) {
-      console.error("Supabase error:", error);
-      return res.status(500).json({ error: "Database error" });
+    if (!accountId) {
+      return res.status(400).json({ error: "Missing account id" });
     }
 
-    return res.json(data || []);
+    const { data, error } = await supabase
+      .from("orders")
+      .select("order_number, total_amount")
+      .eq("account_id", accountId)
+      .eq("status", "pending")
+      .order("order_number", { ascending: true });
+
+    if (error) throw error;
+
+    const orders = (data || []).map(o => ({
+      orderId: o.order_number,
+      total_amount: o.total_amount
+    }));
+
+    res.json(orders);
   } catch (err) {
-    console.error("Orders list error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("orders/list error:", err);
+    res.status(500).json({ error: "Failed to load orders" });
   }
 });
 
-// =======================
-// GET SINGLE ORDER
-// =======================
-app.get("/orders/get", authMiddleware, async (req, res) => {
-  const { orderNumber } = req.query;
-
-  if (!orderNumber) {
-    return res.status(400).json({ error: "Missing orderNumber" });
-  }
-
+/* ===================== GET SINGLE ORDER ===================== */
+app.get("/orders/get", requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { orderId } = req.query;
+    const accountId = req.headers["x-account-id"];
+
+    if (!orderId || !accountId) {
+      return res.status(400).json({ error: "Invalid request" });
+    }
+
+    const { data: order, error } = await supabase
       .from("orders")
-      .select("*")
-      .eq("account_id", req.user.accountId)
-      .eq("order_number", orderNumber)
+      .select("storage_path")
+      .eq("account_id", accountId)
+      .eq("order_number", orderId)
       .single();
 
-    if (error || !data) {
+    if (error || !order?.storage_path) {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    return res.json(data);
+    const filePath = path.join("/data", order.storage_path);
+    const json = JSON.parse(await fs.readFile(filePath, "utf8"));
+
+    res.json(json);
   } catch (err) {
-    console.error("Get order error:", err);
-    return res.status(500).json({ error: "Internal server error" });
+    console.error("orders/get error:", err);
+    res.status(500).json({ error: "Failed to load order" });
   }
 });
 
-// =======================
-// START SERVER
-// =======================
-const listenPort = PORT || 8080;
+/* ===================== DELETE (FINALIZE / CANCEL) ===================== */
+app.post("/orders/delete", requireAuth, async (req, res) => {
+  try {
+    const { orderId, accountId } = req.body;
 
-app.listen(listenPort, () => {
-  console.log(`✅ WMS backend running on port ${listenPort}`);
+    if (!orderId || !accountId) {
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    const { error } = await supabase
+      .from("orders")
+      .update({ status: "done" })
+      .eq("account_id", accountId)
+      .eq("order_number", orderId);
+
+    if (error) throw error;
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("orders/delete error:", err);
+    res.status(500).json({ error: "Failed to update order" });
+  }
 });
+
+/* ===================== START ===================== */
+app.listen(PORT, () => {
+  console.log(`✅ WMS backend running on port ${PORT}`);
+});
+
 
 
 
