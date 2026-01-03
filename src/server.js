@@ -81,15 +81,16 @@ app.get("/orders/list", requireAuth, async (req, res) => {
   }
 });
 
-/* ===================== GET ORDER ===================== */
+/* ===================== GET SINGLE ORDER ===================== */
 app.get("/orders/get", requireAuth, async (req, res) => {
   try {
     const { orderId, accountId } = req.query;
 
     if (!orderId || !accountId) {
-      return res.status(400).json({ error: "Missing params" });
+      return res.status(400).json({ error: "Invalid request" });
     }
 
+    // 1️⃣ Luăm storage_path din DB
     const { data: order, error } = await supabase
       .from("orders")
       .select("storage_path")
@@ -101,15 +102,26 @@ app.get("/orders/get", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    const filePath = path.join("/data", order.storage_path);
+    // 2️⃣ Citim fișierul din SUPABASE STORAGE
+    const { data: file, error: fileError } = await supabase
+      .storage
+      .from("comenzi")
+      .download(order.storage_path);
 
-    const raw = await fs.readFile(filePath, "utf8");
-    const json = JSON.parse(raw);
+    if (fileError) {
+      console.error("Storage download error:", fileError);
+      return res.status(500).json({ error: "Failed to load order file" });
+    }
+
+    // 3️⃣ Convertim Blob → JSON
+    const text = await file.text();
+    const json = JSON.parse(text);
 
     res.json(json);
+
   } catch (err) {
     console.error("orders/get error:", err);
-    res.status(500).json({ error: "Failed to load order JSON" });
+    res.status(500).json({ error: "Failed to load order" });
   }
 });
 
