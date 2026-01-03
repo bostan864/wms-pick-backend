@@ -42,9 +42,19 @@ function authMiddleware(req, res, next) {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
 
+    const accountId =
+      decoded.account_id ||
+      decoded.user_metadata?.account_id ||
+      decoded.app_metadata?.account_id;
+
+    if (!accountId) {
+      console.error("❌ account_id missing in JWT", decoded);
+      return res.status(401).json({ error: "Invalid token: no account_id" });
+    }
+
     req.user = {
       userId: decoded.sub,
-      accountId: decoded.account_id
+      accountId
     };
 
     next();
