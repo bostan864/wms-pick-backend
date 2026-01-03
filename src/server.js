@@ -1,163 +1,109 @@
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 import { createClient } from "@supabase/supabase-js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// 🔐 ENV
 const PORT = process.env.PORT || 8080;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-/* =========================
-   SUPABASE (SERVICE ROLE)
-   ========================= */
+// 🧠 VALIDARE ENV – CRITIC
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ Missing Supabase ENV vars");
+  process.exit(1);
+}
+
+// 🔌 Supabase client (SERVICE ROLE)
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY
 );
 
-/* =========================
-   HEALTH CHECK
-   ========================= */
-app.get("/health", (_, res) => {
-  res.json({ status: "ok", service: "wms-pick-backend" });
+// =====================
+// HEALTH CHECK
+// =====================
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "wms-pick-backend",
+    time: new Date().toISOString()
+  });
 });
 
-/* =========================
-   ORDERS LIST
-   ========================= */
+// =====================
+// ORDERS LIST
+// =====================
 app.get("/orders/list", async (req, res) => {
   try {
-    const auth = req.headers.authorization;
-    if (!auth) {
-      return res.status(401).json({ error: "Missing Authorization" });
-    }
-
-    // 🔐 validăm userul
-    const { data: userData, error: userErr } =
-      await supabase.auth.getUser(auth.replace("Bearer ", ""));
-
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-
-    // 🔑 account_id
-    const { data: acc } = await supabase
-      .from("user_accounts")
-      .select("account_id")
-      .eq("user_id", userData.user.id)
-      .single();
-
-    if (!acc) return res.json([]);
-
-    // 📦 comenzi pending
-    const { data: orders } = await supabase
+    const { data, error } = await supabase
       .from("orders")
-      .select("order_number, total_amount, storage_path")
-      .eq("account_id", acc.account_id)
+      .select("id, order_number, status, total_amount")
       .eq("status", "pending")
-      .order("created_at", { ascending: true });
+      .order("order_number", { ascending: false });
+
+    if (error) throw error;
 
     res.json(
-      (orders || []).map(o => ({
+      data.map(o => ({
         orderId: o.order_number,
-        total_amount: o.total_amount,
-        storage_path: o.storage_path
+        total_amount: o.total_amount
       }))
     );
 
   } catch (err) {
-    console.error("orders/list:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("❌ orders/list:", err);
+    res.status(500).json({ error: "Failed to load orders" });
   }
 });
 
-/* =========================
-   GET SINGLE ORDER
-   ========================= */
+// =====================
+// ORDER GET (FĂRĂ PRODUSE DEOCAMDATĂ)
+// =====================
 app.get("/orders/get", async (req, res) => {
-  try {
-    const { orderId } = req.query;
-    const auth = req.headers.authorization;
-
-    if (!orderId || !auth) {
-      return res.status(400).json({ error: "Missing params" });
-    }
-
-    const token = auth.replace("Bearer ", "");
-
-    const { data: userData, error: userErr } =
-      await supabase.auth.getUser(token);
-
-    if (userErr || !userData?.user) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
-
-    // account
-    const { data: acc } = await supabase
-      .from("user_accounts")
-      .select("account_id")
-      .eq("user_id", userData.user.id)
-      .single();
-
-    // order row
-    const { data: order } = await supabase
-      .from("orders")
-      .select("storage_path")
-      .eq("order_number", orderId)
-      .eq("account_id", acc.account_id)
-      .single();
-
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
-
-    // 📂 download order JSON from storage
-    const { data: file, error: fileErr } =
-      await supabase.storage
-        .from("orders")
-        .download(order.storage_path);
-
-    if (fileErr) {
-      return res.status(500).json({ error: "Storage read error" });
-    }
-
-    const text = await file.text();
-    const json = JSON.parse(text);
-
-    res.json(json);
-
-  } catch (err) {
-    console.error("orders/get:", err);
-    res.status(500).json({ error: "Server error" });
+  const { orderId } = req.query;
+  if (!orderId) {
+    return res.status(400).json({ error: "Missing orderId" });
   }
+
+  res.json({
+    orderId,
+    line_items: [] // 🔴 PASUL URMĂTOR
+  });
 });
 
-/* =========================
-   DELETE / FINALIZE ORDER
-   ========================= */
+// =====================
+// DELETE / FINALIZE ORDER
+// =====================
 app.post("/orders/delete", async (req, res) => {
-  try {
-    const { orderId, accountId } = req.body;
-    if (!orderId || !accountId) {
-      return res.status(400).json({ error: "Missing data" });
-    }
+  const { orderId } = req.body;
+  if (!orderId) {
+    return res.status(400).json({ error: "Missing orderId" });
+  }
 
-    await supabase
+  try {
+    const { error } = await supabase
       .from("orders")
       .update({ status: "done" })
-      .eq("order_number", orderId)
-      .eq("account_id", accountId);
+      .eq("order_number", orderId);
+
+    if (error) throw error;
 
     res.json({ ok: true });
+
   } catch (err) {
-    console.error("orders/delete:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error("❌ orders/delete:", err);
+    res.status(500).json({ error: "Failed to finalize order" });
   }
 });
 
-/* ========================= */
+// =====================
+// START SERVER
+// =====================
 app.listen(PORT, () => {
-  console.log("WMS backend running on", PORT);
+  console.log(`✅ WMS backend running on port ${PORT}`);
 });
+
