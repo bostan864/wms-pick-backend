@@ -1,8 +1,6 @@
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
-import fs from "fs/promises";
-import path from "path";
 import { createClient } from "@supabase/supabase-js";
 
 /* ===================== ENV ===================== */
@@ -23,6 +21,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+/* ===================== SUPABASE (SERVICE ROLE) ===================== */
 const supabase = createClient(
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY
@@ -41,7 +40,7 @@ function requireAuth(req, res, next) {
     const payload = jwt.verify(token, SUPABASE_JWT_SECRET);
     req.userId = payload.sub;
     next();
-  } catch {
+  } catch (err) {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -54,8 +53,7 @@ app.get("/health", (_, res) => {
 /* ===================== LIST ORDERS ===================== */
 app.get("/orders/list", requireAuth, async (req, res) => {
   try {
-    const accountId = req.query.accountId;
-
+    const { accountId } = req.query;
     if (!accountId) {
       return res.status(400).json({ error: "Missing accountId" });
     }
@@ -85,12 +83,10 @@ app.get("/orders/list", requireAuth, async (req, res) => {
 app.get("/orders/get", requireAuth, async (req, res) => {
   try {
     const { orderId, accountId } = req.query;
-
     if (!orderId || !accountId) {
       return res.status(400).json({ error: "Invalid request" });
     }
 
-    // 1️⃣ Luăm storage_path din DB
     const { data: order, error } = await supabase
       .from("orders")
       .select("storage_path")
@@ -102,50 +98,65 @@ app.get("/orders/get", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    // 2️⃣ Citim fișierul din SUPABASE STORAGE
     const { data: file, error: fileError } = await supabase
       .storage
       .from("comenzi")
       .download(order.storage_path);
 
     if (fileError) {
-      console.error("Storage download error:", fileError);
+      console.error("Storage error:", fileError);
       return res.status(500).json({ error: "Failed to load order file" });
     }
 
-    // 3️⃣ Convertim Blob → JSON
     const text = await file.text();
     const json = JSON.parse(text);
 
     res.json(json);
-
   } catch (err) {
     console.error("orders/get error:", err);
     res.status(500).json({ error: "Failed to load order" });
   }
 });
 
-/* ===================== FINALIZE ORDER ===================== */
+/* ===================== FINALIZE ORDER (CORE LOGIC) ===================== */
 app.post("/orders/delete", requireAuth, async (req, res) => {
   try {
-    const { orderId, accountId } = req.body;
+    const {
+      orderId,
+      accountId,
+      orderAmount = 0,
+      durationSeconds = 0
+    } = req.body;
 
     if (!orderId || !accountId) {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    const { error } = await supabase
+    /* 1️⃣ UPDATE ORDER STATUS */
+    const { error: orderError } = await supabase
       .from("orders")
       .update({ status: "done" })
       .eq("account_id", accountId)
       .eq("order_number", orderId);
 
-    if (error) throw error;
+    if (orderError) throw orderError;
+
+    /* 2️⃣ UPDATE DAILY STATS (RPC, SERVICE ROLE) */
+    const { error: statsError } = await supabase.rpc(
+      "increment_daily_stats",
+      {
+        p_account_id: accountId,
+        p_amount: Number(orderAmount) || 0,
+        p_seconds: Number(durationSeconds) || 0
+      }
+    );
+
+    if (statsError) throw statsError;
 
     res.json({ ok: true });
   } catch (err) {
     console.error("orders/delete error:", err);
-    res.status(500).json({ error: "Failed to update order" });
+    res.status(500).json({ error: "Failed to finalize order" });
   }
 });
 
