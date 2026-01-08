@@ -40,7 +40,7 @@ function requireAuth(req, res, next) {
     const payload = jwt.verify(token, SUPABASE_JWT_SECRET);
     req.userId = payload.sub;
     next();
-  } catch (err) {
+  } catch {
     return res.status(401).json({ error: "Invalid token" });
   }
 }
@@ -118,7 +118,7 @@ app.get("/orders/get", requireAuth, async (req, res) => {
   }
 });
 
-/* ===================== FINALIZE ORDER (CORE LOGIC) ===================== */
+/* ===================== FINALIZE ORDER (DELETE STORAGE FILE) ===================== */
 app.post("/orders/delete", requireAuth, async (req, res) => {
   try {
     const {
@@ -132,7 +132,32 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    /* 1️⃣ UPDATE ORDER STATUS */
+    /* 1️⃣ LUĂM STORAGE_PATH DIN ORDERS */
+    const { data: orderRow, error: fetchError } = await supabase
+      .from("orders")
+      .select("storage_path")
+      .eq("account_id", accountId)
+      .eq("order_number", String(orderId))
+      .single();
+
+    if (fetchError || !orderRow) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    /* 2️⃣ ȘTERGEM DOAR FIȘIERUL DIN STORAGE */
+    if (orderRow.storage_path) {
+      const { error: storageError } = await supabase
+        .storage
+        .from("comenzi")
+        .remove([orderRow.storage_path]);
+
+      // nu blocăm finalizarea dacă fișierul e deja șters
+      if (storageError) {
+        console.warn("Storage delete warning:", storageError.message);
+      }
+    }
+
+    /* 3️⃣ MARCĂM COMANDA CA DONE */
     const { error: orderError } = await supabase
       .from("orders")
       .update({ status: "done" })
@@ -141,7 +166,7 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
 
     if (orderError) throw orderError;
 
-    /* 2️⃣ UPDATE DAILY STATS (RPC, SERVICE ROLE) */
+    /* 4️⃣ UPDATE DAILY STATS */
     const { error: statsError } = await supabase.rpc(
       "increment_daily_stats",
       {
@@ -154,6 +179,7 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
     if (statsError) throw statsError;
 
     res.json({ ok: true });
+
   } catch (err) {
     console.error("orders/delete error:", err);
     res.status(500).json({ error: "Failed to finalize order" });
@@ -164,8 +190,6 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ WMS backend running on port ${PORT}`);
 });
-
-
 
 
 
