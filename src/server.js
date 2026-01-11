@@ -118,6 +118,40 @@ app.get("/orders/get", requireAuth, async (req, res) => {
   }
 });
 
+/* =========================================================
+   🔍 NEW: GET ORDER BY AWB (MINIMAL, SAFE EXTENSION)
+   ========================================================= */
+app.get("/orders/by-awb", requireAuth, async (req, res) => {
+  try {
+    const { awb } = req.query;
+
+    if (!awb) {
+      return res.status(400).json({ error: "Missing awb" });
+    }
+
+    const { data, error } = await supabase
+      .from("orders")
+      .select("order_number, account_id, storage_path")
+      .eq("shipping_awb", String(awb))
+      .limit(1)
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: "Order not found for AWB" });
+    }
+
+    res.json({
+      orderId: data.order_number,
+      accountId: data.account_id,
+      storage_path: data.storage_path
+    });
+
+  } catch (err) {
+    console.error("orders/by-awb error:", err);
+    res.status(500).json({ error: "Failed to lookup order by AWB" });
+  }
+});
+
 /* ===================== FINALIZE ORDER (DELETE STORAGE FILE) ===================== */
 app.post("/orders/delete", requireAuth, async (req, res) => {
   try {
@@ -132,7 +166,6 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Invalid payload" });
     }
 
-    /* 1️⃣ LUĂM STORAGE_PATH DIN ORDERS */
     const { data: orderRow, error: fetchError } = await supabase
       .from("orders")
       .select("storage_path")
@@ -144,20 +177,17 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
       return res.status(404).json({ error: "Order not found" });
     }
 
-    /* 2️⃣ ȘTERGEM DOAR FIȘIERUL DIN STORAGE */
     if (orderRow.storage_path) {
       const { error: storageError } = await supabase
         .storage
         .from("comenzi")
         .remove([orderRow.storage_path]);
 
-      // nu blocăm finalizarea dacă fișierul e deja șters
       if (storageError) {
         console.warn("Storage delete warning:", storageError.message);
       }
     }
 
-    /* 3️⃣ MARCĂM COMANDA CA DONE */
     const { error: orderError } = await supabase
       .from("orders")
       .update({ status: "done" })
@@ -166,7 +196,6 @@ app.post("/orders/delete", requireAuth, async (req, res) => {
 
     if (orderError) throw orderError;
 
-    /* 4️⃣ UPDATE DAILY STATS */
     const { error: statsError } = await supabase.rpc(
       "increment_daily_stats",
       {
